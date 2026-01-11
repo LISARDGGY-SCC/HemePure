@@ -1,89 +1,127 @@
-#!/bin/bash
-## Compilation/build script for HEMELB
-## Run from found location
+#!/bin/sh
 
-## MODULE loads
-##GCC compilers
-MODULES(){
+set -e
 
-#Module environment on ARCHER2
-#module restore PrgEnv-gnu 
-
-#Module environment on SuperMUC-NG, default compilers are fine
-#module load cmake
-
-#Module environment on Aurora, default compilers are fine
-module load cmake
-module load python
-module load boost
-
-#module list
-#Export compiler shortcuts as named on given machine
-export CC=mpicc
-export CXX=mpicxx
-
+usage(){
+	printf "%s [VARIENT | --help]\n" "$1"
+	printf "VARIENT:\n"
+	printf "\tPP:\t\tPressure-Pressure BCs\n"
+	printf "\tVP:\t\tVelocity-Pressure BCs\n"
+	printf "\tany other:\t\tthe default\n"
 }
 
-## HEMELB build
-# 1) Dependencies
-DEPbuild(){
-cd dep
-rm -rf build
-mkdir build
-cd build
-cmake -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} ..
-make -j  && echo "Done HemeLB Dependencies"
+MODULES(){
+	# you might need to put these in env.sh for efficiency
+	if module avail > /dev/null 2> /dev/null
+	then
+		module purge
 
-cd ../..
+		module load apps/adf/2024.102-intelmpi-intel
+
+	else
+		echo "No modules, skipping loading"
+	fi
+
+	export CC=mpicc
+	export CXX=mpicxx
+
+	export USE_SSE3="ON"
+	export USE_AVX2="ON"
+}
+
+DEPbuild(){
+
+	if [ -d dep/build ]
+	then
+		return 0
+	fi
+
+	echo ""
+	echo "Start building dependencies..."
+	echo ""
+
+	cmake -B dep/build dep --fresh \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_COMPILER="${CC}" \
+		-DCMAKE_CXX_COMPILER="${CXX}"
+	cmake --build dep/build -j
 }
 
 SRCbuild(){
-cd src
-FOLDER=build_PV
 
-rm -rf $FOLDER
-mkdir $FOLDER
-cd $FOLDER
+	VARIENT="$1"
 
-cmake -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} -DHEMELB_USE_GMYPLUS=OFF -DHEMELB_USE_MPI_WIN=OFF -DHEMELB_USE_SSE3=ON -DHEMELB_USE_AVX2=ON -DHEMELB_OUTLET_BOUNDARY=LADDIOLET -DHEMELB_WALL_OUTLET_BOUNDARY=LADDIOLETBFL -DHEMELB_USE_VELOCITY_WEIGHTS_FILE=OFF ..
+	echo ""
+	printf "Start building src with varient '%s'\n" "$VARIENT"
+	echo ""
 
-make -j && echo "Done HemeLB Source"
+	set --
 
-cd ../..
+	case "$VARIENT"
+	in
+		"PP")
+		set -- "$@" \
+			-DHEMELB_USE_VELOCITY_WEIGHTS_FILE=OFF \
+			-DHEMELB_INLET_BOUNDARY=NASHZEROTHORDERPRESSUREIOLET \
+			-DHEMELB_WALL_INLET_BOUNDARY=NASHZEROTHORDERPRESSURESBB \
+			-DHEMELB_OUTLET_BOUNDARY=NASHZEROTHORDERPRESSUREIOLET \
+			-DHEMELB_WALL_OUTLET_BOUNDARY=NASHZEROTHORDERPRESSURESBB
+		;;
+		"VP")
+		set -- "$@" \
+			-DHEMELB_USE_VELOCITY_WEIGHTS_FILE=ON \
+			-DHEMELB_INLET_BOUNDARY=LADDIOLET \
+			-DHEMELB_WALL_INLET_BOUNDARY=LADDIOLETSBB \
+			-DHEMELB_OUTLET_BOUNDARY=NASHZEROTHORDERPRESSUREIOLET \
+			-DHEMELB_WALL_OUTLET_BOUNDARY=NASHZEROTHORDERPRESSURESBB \
+		;;
+		*)
+		;;
+	esac
+
+	if [ -z "${CUDA_GRAPH}" ]
+	then
+		set -- "$@" \
+			-DHEMELB_USE_CUDA_GRAPH=OFF \
+			-DCMAKE_CUDA_FLAGS="--maxrregcount=64 --ptxas-options=-v"
+	fi
+
+	INSTALL_DIR="$(pwd)/hemelab${VARIENT:+-${VARIENT}}"
+
+	if [ -d "${INSTALL_DIR}" ]
+	then
+		rm -rf "${INSTALL_DIR}"
+	fi
+
+	# NVC doesn't support cmake ipo detection
+	# and we shall not use -Mipa=fast, it would cause seg fault
+	# sm70 for V100
+
+	cmake -B src/build src \
+		--install-prefix="${INSTALL_DIR}" \
+		--fresh \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_C_COMPILER="${CC}" \
+		-DCMAKE_CXX_COMPILER="${CXX}" \
+		\
+		-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+		-DCMAKE_SKIP_BUILD_RPATH=FALSE \
+		-DCMAKE_INSTALL_RPATH="${INSTALL_DIR}/lib" \
+		-DCMAKE_INSTALL_RPATH_USE_LINK_PATH=TRUE \
+		\
+		-DHEMELB_USE_GMYPLUS=OFF -DHEMELB_USE_MPI_WIN=OFF \
+		-DHEMELB_USE_SSE3="${USE_SSE3}" \
+		-DHEMELB_USE_AVX2="${USE_AVX2}" \
+		"$@"
+	cmake --build src/build -j
+	cmake --install src/build
 }
 
-SRCbuild_Benchmark(){
-cd src
-FOLDER=build_PP_Benchmark
-
-rm -rf $FOLDER
-mkdir $FOLDER
-cd $FOLDER
-
-cmake -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} -DHEMELB_USE_GMYPLUS=OFF -DHEMELB_USE_MPI_WIN=OFF -DHEMELB_USE_SSE3=ON -DHEMELB_USE_AVX2=ON ..
-
-make -j && echo "Done HemeLB Source"
-
-cd ../..
-}
-
-SRCbuild_ARCHER2(){
-cd src
-FOLDER=build
-rm -rf $FOLDER
-mkdir $FOLDER
-cd $FOLDER
-
-cmake -DCMAKE_Fortran_COMPILER=${FC} -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} -DCTEMPLATE_LIBRARY=<PathToRepoOnARCHER2>/dep/install/lib/libctemplate.a -DHEMELB_USE_MPI_WIN=OFF ..
-
-
-make -j && echo "Done HemeLB Source"
-
-cd ../..
-}
-
+if [ "$1" = "--help" ]
+then
+	usage "$0"
+fi
 
 MODULES
 DEPbuild
-SRCbuild
-SRCbuild_Benchmark
+SRCbuild "$1"
