@@ -8,7 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-amd64:
+    name: Build AMD64 (x86_64)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -49,3 +50,49 @@ jobs:
         else
           ./FullBuild.sh "${{ matrix.variant }}"
         fi
+
+  build-arm64:
+    name: Build ARM64 (aarch64)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ["", "PP", "VP"]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run Build in ARM64 Container
+        uses: uraimo/run-on-arch-action@v2
+        id: build
+        with:
+          arch: aarch64
+          distro: ubuntu22.04
+
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y build-essential openmpi-bin libopenmpi-dev curl git ca-certificates file
+
+          run: |
+            chmod +x ./toolchain.sh
+            ./toolchain.sh $(pwd)/toolchain 3.29.9 linux-aarch64
+
+            if [ ! -f env.sh ]; then echo "env.sh missing"; exit 1; fi
+
+            . ./env.sh
+
+            echo "Checking CMake Architecture:"
+            file $(which cmake)
+            cmake --version
+
+            chmod +x ./FullBuild.sh
+            VARIANT="${{ matrix.variant }}"
+
+            if [ -z "$VARIANT" ]; then
+              ./FullBuild.sh
+            else
+              ./FullBuild.sh "$VARIANT"
+            fi
